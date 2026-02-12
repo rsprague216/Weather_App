@@ -1,46 +1,83 @@
-import { useState, useEffect } from 'react'
-import axios from 'axios'
+import { BrowserRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom'
+import { AuthProvider } from './context/AuthContext'
+import Login from './pages/Login'
+import Signup from './pages/Signup'
+import Layout from './components/Layout'
+import SavedLocations from './pages/SavedLocations'
+import WeatherDetail from './pages/WeatherDetail'
+import AddLocation from './pages/AddLocation'
+import AILookup from './pages/AILookup'
+import ProtectedRoute from './components/ProtectedRoute'
 
+/**
+ * Top-level React component.
+ *
+ * Responsibilities:
+ * - Own the router instance
+ * - Provide authentication context to the entire app
+ * - Delegate route structure to `AppRoutes`
+ */
 function App() {
-  const [message, setMessage] = useState('')
-  const [loading, setLoading] = useState(true)
+  return (
+    <Router>
+      <AuthProvider>
+        <AppRoutes />
+      </AuthProvider>
+    </Router>
+  )
+}
 
-  useEffect(() => {
-    // Test API connection
-    axios.get('/api/health')
-      .then(response => {
-        setMessage(response.data.message)
-        setLoading(false)
-      })
-      .catch(error => {
-        console.error('Error fetching data:', error)
-        setMessage('Failed to connect to server')
-        setLoading(false)
-      })
-  }, [])
+/**
+ * Defines all app routes.
+ *
+ * This app uses a simple “background location” pattern to support modal-style routes.
+ * Example: AI Lookup can open as an overlay while preserving the underlying route.
+ *
+ * When navigation includes `{ state: { backgroundLocation: location } }`, we render:
+ * - The background routes using `backgroundLocation`
+ * - The overlay route on top using the real `location`
+ */
+function AppRoutes() {
+  const location = useLocation()
+  const backgroundLocation = location.state?.backgroundLocation
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-blue-400 to-blue-600 flex items-center justify-center">
-      <div className="bg-white rounded-lg shadow-2xl p-8 max-w-md w-full">
-        <h1 className="text-4xl font-bold text-center text-gray-800 mb-6">
-          Weather App
-        </h1>
-        <div className="text-center">
-          {loading ? (
-            <p className="text-gray-600">Loading...</p>
-          ) : (
-            <div>
-              <p className="text-xl text-gray-700 mb-4">{message}</p>
-              <div className="mt-6 p-4 bg-blue-50 rounded-lg">
-                <p className="text-sm text-gray-600">
-                  Built with React, Vite, TailwindCSS & Node.js
-                </p>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
+    <>
+      <Routes location={backgroundLocation || location}>
+        <Route path="/login" element={<Login />} />
+        <Route path="/signup" element={<Signup />} />
+
+        <Route
+          path="/"
+          element={
+            <ProtectedRoute>
+              <Layout />
+            </ProtectedRoute>
+          }
+        >
+          <Route index element={<Navigate to="/locations" replace />} />
+          <Route path="locations" element={<SavedLocations />} />
+          <Route path="weather/:locationId" element={<WeatherDetail />} />
+          <Route path="add-location" element={<AddLocation />} />
+          <Route path="lookup" element={<AILookup />} />
+        </Route>
+      </Routes>
+
+      {backgroundLocation && (
+        <Routes>
+          <Route
+            path="/"
+            element={
+              <ProtectedRoute>
+                <Layout />
+              </ProtectedRoute>
+            }
+          >
+            <Route path="lookup" element={<AILookup />} />
+          </Route>
+        </Routes>
+      )}
+    </>
   )
 }
 
