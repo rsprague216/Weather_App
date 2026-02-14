@@ -14,11 +14,11 @@ const __dirname = path.dirname(__filename);
 
 // Database connection configuration
 const config = {
-  user: process.env.DB_USER || 'postgres',
-  host: process.env.DB_HOST || 'localhost',
-  database: process.env.DB_NAME || 'weather_app',
-  password: process.env.DB_PASSWORD || 'postgres',
-  port: process.env.DB_PORT || 5432,
+  user: process.env.POSTGRES_USER || process.env.DB_USER || 'postgres',
+  host: process.env.POSTGRES_HOST || process.env.DB_HOST || 'localhost',
+  database: process.env.POSTGRES_DB || process.env.DB_NAME || 'weather_app',
+  password: process.env.POSTGRES_PASSWORD || process.env.DB_PASSWORD || 'postgres',
+  port: process.env.POSTGRES_PORT || process.env.DB_PORT || 5432,
 };
 
 async function runMigrations() {

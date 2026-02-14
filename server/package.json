@@ -9,7 +9,13 @@
     "start": "node index.js",
     "db:create": "node db/create-db.js",
     "db:migrate": "node db/init.js",
-    "db:setup": "npm run db:create && npm run db:migrate"
+    "db:setup": "npm run db:create && npm run db:migrate",
+    "test": "npm run test:unit && npm run test:integration",
+    "test:unit": "NODE_ENV=test JWT_SECRET=test-secret OPENAI_API_KEY=test-openai-key vitest run tests/unit",
+    "test:integration": "POSTGRES_DB=${POSTGRES_DB:-weather_app_test} NODE_ENV=test JWT_SECRET=test-secret OPENAI_API_KEY=test-openai-key npm run test:db:setup && POSTGRES_DB=${POSTGRES_DB:-weather_app_test} NODE_ENV=test JWT_SECRET=test-secret OPENAI_API_KEY=test-openai-key vitest run tests/integration",
+    "test:watch": "POSTGRES_DB=${POSTGRES_DB:-weather_app_test} NODE_ENV=test JWT_SECRET=test-secret OPENAI_API_KEY=test-openai-key vitest",
+    "test:db:setup": "POSTGRES_DB=${POSTGRES_DB:-weather_app_test} node db/create-db.js && POSTGRES_DB=${POSTGRES_DB:-weather_app_test} node db/init.js",
+    "check:lookup-disambiguation": "node scripts/check-lookup-disambiguation.js"
   },
   "keywords": [
     "nodejs",
@@ -34,6 +40,8 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "nodemon": "^3.0.2"
+    "nodemon": "^3.0.2",
+    "supertest": "^7.1.1",
+    "vitest": "^2.1.8"
   }
 }

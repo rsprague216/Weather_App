@@ -6,6 +6,7 @@ import helmet from 'helmet'
 import rateLimit from 'express-rate-limit'
 import compression from 'compression'
 import morgan from 'morgan'
+import { fileURLToPath } from 'url'
 import { errorHandler } from './middleware/errorHandler.js'
 import pool from './utils/db.js'
 
@@ -18,96 +19,92 @@ import lookupRoutes from './routes/lookup.js'
 
 dotenv.config()
 
-// Validate required environment variables
-const requiredEnvVars = ['JWT_SECRET', 'OPENAI_API_KEY', 'POSTGRES_DB', 'POSTGRES_USER']
-const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName])
+function validateEnvironment() {
+  const requiredEnvVars = ['JWT_SECRET']
+  const missingEnvVars = requiredEnvVars.filter(varName => !process.env[varName])
 
-if (missingEnvVars.length > 0) {
-  console.error('❌ Missing required environment variables:', missingEnvVars.join(', '))
-  console.error('Please check your .env file')
-  process.exit(1)
+  if (missingEnvVars.length > 0) {
+    throw new Error(`Missing required environment variables: ${missingEnvVars.join(', ')}`)
+  }
+
+  if (process.env.JWT_SECRET === 'your-secret-key-change-in-production') {
+    console.warn('⚠️  WARNING: Using default JWT_SECRET. Please set a secure secret in production!')
+  }
 }
 
-if (process.env.JWT_SECRET === 'your-secret-key-change-in-production') {
-  console.warn('⚠️  WARNING: Using default JWT_SECRET. Please set a secure secret in production!')
-}
+export function createApp(options = {}) {
+  const { enableRateLimit = process.env.NODE_ENV !== 'test' } = options
+  const app = express()
 
-const app = express()
-const PORT = process.env.PORT || 5000
+  app.use(helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:', 'https:'],
+        scriptSrc: ["'self'"]
+      }
+    },
+    crossOriginEmbedderPolicy: false
+  }))
 
-// Security Middleware
-app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"],
-      imgSrc: ["'self'", 'data:', 'https:'],
-      scriptSrc: ["'self'"]
-    }
-  },
-  crossOriginEmbedderPolicy: false
-}))
-
-// Rate Limiting
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per windowMs
-  message: { error: { code: 'RATE_LIMIT_EXCEEDED', message: 'Too many requests, please try again later' } },
-  standardHeaders: true,
-  legacyHeaders: false
-})
-
-// Apply rate limiting to all routes
-app.use('/api/', limiter)
-
-// Compression
-app.use(compression())
-
-// Logging
-if (process.env.NODE_ENV === 'production') {
-  app.use(morgan('combined'))
-} else {
-  app.use(morgan('dev'))
-}
-
-// Body parsing with size limits
-app.use(express.json({ limit: '10mb' }))
-app.use(express.urlencoded({ extended: true, limit: '10mb' }))
-app.use(cookieParser())
-
-// CORS
-app.use(cors({
-  origin: process.env.CLIENT_URL || 'http://localhost:3000',
-  credentials: true
-}))
-
-// Health check
-app.get('/api/health', (req, res) => {
-  res.json({ 
-    message: '🎉 Server is running successfully!',
-    timestamp: new Date().toISOString()
+  const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 100,
+    message: { error: { code: 'RATE_LIMIT_EXCEEDED', message: 'Too many requests, please try again later' } },
+    standardHeaders: true,
+    legacyHeaders: false
   })
-})
 
-// API v1 Routes
-app.use('/api/v1/auth', authRoutes)
-app.use('/api/v1/saved-locations', savedLocationsRoutes)
-app.use('/api/v1/locations', locationsRoutes)
-app.use('/api/v1/weather', weatherRoutes)
-app.use('/api/v1/lookup', lookupRoutes)
+  if (enableRateLimit) {
+    app.use('/api/', limiter)
+  }
 
-// Error handling middleware (must be last)
-app.use(errorHandler)
+  app.use(compression())
 
-// 404 handler
-app.use((req, res) => {
-  res.status(404).json({
-    error: {
-      code: 'NOT_FOUND',
-      message: 'The requested resource was not found'
-    }
+  if (process.env.NODE_ENV === 'production') {
+    app.use(morgan('combined'))
+  } else if (process.env.NODE_ENV !== 'test') {
+    app.use(morgan('dev'))
+  }
+
+  app.use(express.json({ limit: '10mb' }))
+  app.use(express.urlencoded({ extended: true, limit: '10mb' }))
+  app.use(cookieParser())
+
+  app.use(cors({
+    origin: process.env.CLIENT_URL || 'http://localhost:3000',
+    credentials: true
+  }))
+
+  app.get('/api/health', (req, res) => {
+    res.json({
+      message: '🎉 Server is running successfully!',
+      timestamp: new Date().toISOString()
+    })
   })
-})
+
+  app.use('/api/v1/auth', authRoutes)
+  app.use('/api/v1/saved-locations', savedLocationsRoutes)
+  app.use('/api/v1/locations', locationsRoutes)
+  app.use('/api/v1/weather', weatherRoutes)
+  app.use('/api/v1/lookup', lookupRoutes)
+
+  app.use(errorHandler)
+
+  app.use((req, res) => {
+    res.status(404).json({
+      error: {
+        code: 'NOT_FOUND',
+        message: 'The requested resource was not found'
+      }
+    })
+  })
+
+  return app
+}
+
+export const app = createApp()
 
 // Database health check on startup
 async function checkDatabaseConnection() {
@@ -124,24 +121,24 @@ async function checkDatabaseConnection() {
 // Start server
 let server
 
-async function startServer() {
-  // Check database connection
+export async function startServer() {
+  validateEnvironment()
+
   const dbConnected = await checkDatabaseConnection()
   if (!dbConnected) {
-    console.error('Failed to connect to database. Exiting...')
-    process.exit(1)
+    throw new Error('Failed to connect to database')
   }
+
+  const PORT = process.env.PORT || 5000
 
   server = app.listen(PORT, () => {
     console.log(`🚀 Server running on http://localhost:${PORT}`)
     console.log(`📝 API documentation: http://localhost:${PORT}/api/health`)
     console.log(`🔒 Environment: ${process.env.NODE_ENV || 'development'}`)
   })
-}
 
-// Graceful shutdown
-process.on('SIGTERM', gracefulShutdown)
-process.on('SIGINT', gracefulShutdown)
+  return server
+}
 
 async function gracefulShutdown(signal) {
   console.log(`\n${signal} received. Starting graceful shutdown...`)
@@ -168,16 +165,27 @@ async function gracefulShutdown(signal) {
   }
 }
 
-// Handle uncaught exceptions
-process.on('uncaughtException', (error) => {
-  console.error('Uncaught Exception:', error)
-  gracefulShutdown('UNCAUGHT_EXCEPTION')
-})
+function registerProcessHandlers() {
+  process.on('SIGTERM', gracefulShutdown)
+  process.on('SIGINT', gracefulShutdown)
 
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled Rejection at:', promise, 'reason:', reason)
-  gracefulShutdown('UNHANDLED_REJECTION')
-})
+  process.on('uncaughtException', (error) => {
+    console.error('Uncaught Exception:', error)
+    gracefulShutdown('UNCAUGHT_EXCEPTION')
+  })
 
-// Start the server
-startServer()
+  process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason)
+    gracefulShutdown('UNHANDLED_REJECTION')
+  })
+}
+
+const isDirectExecution = process.argv[1] === fileURLToPath(import.meta.url)
+
+if (isDirectExecution) {
+  registerProcessHandlers()
+  startServer().catch((error) => {
+    console.error('❌ Server startup failed:', error.message)
+    process.exit(1)
+  })
+}

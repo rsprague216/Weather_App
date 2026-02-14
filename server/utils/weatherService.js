@@ -73,8 +73,8 @@ export async function fetchWeatherData(lat, lon, locationName, units = 'imperial
       windKph: (parseInt(currentHourly.windSpeed) || 0) * 1.60934,
       windDir: currentHourly.windDirection,
       humidity: currentHourly.relativeHumidity?.value || 0,
-      feelsLikeF: currentHourly.temperature, // NWS doesn't provide feels like
-      feelsLikeC: (currentHourly.temperature - 32) * 5/9,
+      feelsLikeF: estimateFeelsLike(currentHourly.temperature, parseInt(currentHourly.windSpeed) || 0, currentHourly.relativeHumidity?.value || 0),
+      feelsLikeC: (estimateFeelsLike(currentHourly.temperature, parseInt(currentHourly.windSpeed) || 0, currentHourly.relativeHumidity?.value || 0) - 32) * 5/9,
       precipChance: currentHourly.probabilityOfPrecipitation?.value || 0,
       dewPointF: currentHourly.dewpoint?.value ? celsiusToFahrenheit(currentHourly.dewpoint.value) : null,
       dewPointC: currentHourly.dewpoint?.value || null
@@ -171,4 +171,32 @@ export async function fetchWeatherData(lat, lon, locationName, units = 'imperial
  */
 function celsiusToFahrenheit(celsius) {
   return (celsius * 9/5) + 32
+}
+
+/**
+ * Estimates "feels like" temperature using wind chill (cold) or heat index (hot).
+ * Falls back to the actual temperature for moderate conditions.
+ *
+ * @param {number} tempF - Temperature in Fahrenheit
+ * @param {number} windMph - Wind speed in mph
+ * @param {number} humidity - Relative humidity percentage
+ * @returns {number} Estimated feels-like temperature in Fahrenheit
+ */
+function estimateFeelsLike(tempF, windMph, humidity) {
+  // Wind chill: applies when temp <= 50°F and wind > 3 mph
+  if (tempF <= 50 && windMph > 3) {
+    return Math.round(
+      35.74 + 0.6215 * tempF - 35.75 * Math.pow(windMph, 0.16) + 0.4275 * tempF * Math.pow(windMph, 0.16)
+    )
+  }
+  // Heat index: applies when temp >= 80°F
+  if (tempF >= 80) {
+    return Math.round(
+      -42.379 + 2.04901523 * tempF + 10.14333127 * humidity
+      - 0.22475541 * tempF * humidity - 0.00683783 * tempF * tempF
+      - 0.05481717 * humidity * humidity + 0.00122874 * tempF * tempF * humidity
+      + 0.00085282 * tempF * humidity * humidity - 0.00000199 * tempF * tempF * humidity * humidity
+    )
+  }
+  return tempF
 }

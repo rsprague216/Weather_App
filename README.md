@@ -97,6 +97,52 @@ npm run dev:client
 npm run dev:server
 ```
 
+## Testing
+
+### Run all tests
+
+```bash
+npm run test
+```
+
+This runs:
+- Backend unit tests (`server/tests/unit`)
+- Backend integration tests (`server/tests/integration`)
+- Frontend component tests (`client/src/**/*.test.*`)
+
+### Run individual suites
+
+```bash
+npm run test:server
+npm run test:client
+npm run test:e2e
+```
+
+### Backend integration test database
+
+Backend integration tests use a dedicated Postgres DB (`weather_app_test` by default).
+
+The integration script automatically:
+- creates the test database if missing,
+- runs all migrations,
+- executes integration tests.
+
+If needed, you can override the DB name:
+
+```bash
+POSTGRES_DB=my_custom_test_db npm --prefix server run test:integration
+```
+
+### E2E notes
+
+E2E tests are powered by Playwright and use a smoke test in `e2e/auth-smoke.spec.js`.
+
+If browsers are not installed yet:
+
+```bash
+npx playwright install
+```
+
 ## API Notes
 
 - All API routes are versioned under `/api/v1/*`.
@@ -110,6 +156,11 @@ If API calls fail in dev, confirm the backend port matches the proxy target in [
 
 - Architecture/design: [weather_app_design_v1_1.md](weather_app_design_v1_1.md)
 - Wireframes: [weather_app_wireframes_v1_0.md](weather_app_wireframes_v1_0.md)
+
+## Testing Reports
+
+- Status snapshot: [TESTING_STATUS.md](TESTING_STATUS.md)
+- Detailed report: [TEST_RESULTS_REPORT.md](TEST_RESULTS_REPORT.md)
 
 ## License
 

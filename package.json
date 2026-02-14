@@ -8,12 +8,17 @@
     "dev:client": "cd client && npm run dev",
     "dev:server": "cd server && npm run dev",
     "build": "cd client && npm run build",
-    "install:all": "npm install && cd client && npm install && cd ../server && npm install"
+    "install:all": "npm install && cd client && npm install && cd ../server && npm install",
+    "test": "npm run test:server && npm run test:client",
+    "test:client": "npm --prefix client run test",
+    "test:server": "npm --prefix server run test",
+    "test:e2e": "playwright test"
   },
   "keywords": ["react", "vite", "tailwindcss", "nodejs"],
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@playwright/test": "^1.53.1",
     "concurrently": "^8.2.2"
   }
 }

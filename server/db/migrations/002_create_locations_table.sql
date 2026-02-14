@@ -17,5 +17,6 @@ CREATE INDEX IF NOT EXISTS idx_locations_external_id ON locations(external_id);
 CREATE INDEX IF NOT EXISTS idx_locations_coordinates ON locations(latitude, longitude);
 
 -- Create trigger to automatically update updated_at timestamp
+DROP TRIGGER IF EXISTS update_locations_updated_at ON locations;
 CREATE TRIGGER update_locations_updated_at BEFORE UPDATE ON locations
   FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();

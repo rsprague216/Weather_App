@@ -6,15 +6,15 @@ const { Client } = pg;
 // Load environment variables
 dotenv.config();
 
-const dbName = process.env.DB_NAME || 'weather_app';
+const dbName = process.env.POSTGRES_DB || process.env.DB_NAME || 'weather_app';
 
 // Connect to postgres database to create the weather_app database
 const config = {
-  user: process.env.DB_USER || 'postgres',
-  host: process.env.DB_HOST || 'localhost',
+  user: process.env.POSTGRES_USER || process.env.DB_USER || 'postgres',
+  host: process.env.POSTGRES_HOST || process.env.DB_HOST || 'localhost',
   database: 'postgres', // Connect to default postgres database
-  password: process.env.DB_PASSWORD || 'postgres',
-  port: process.env.DB_PORT || 5432,
+  password: process.env.POSTGRES_PASSWORD || process.env.DB_PASSWORD || 'postgres',
+  port: process.env.POSTGRES_PORT || process.env.DB_PORT || 5432,
 };
 
 async function createDatabase() {

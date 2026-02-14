@@ -9,11 +9,16 @@
 
 import jwt from 'jsonwebtoken'
 
-const JWT_SECRET = process.env.JWT_SECRET
+const getJwtSecret = () => {
+  const jwtSecret = process.env.JWT_SECRET
+  if (!jwtSecret) {
+    const error = new Error('JWT_SECRET environment variable is required')
+    error.code = 'MISSING_JWT_SECRET'
+    error.statusCode = 500
+    throw error
+  }
 
-// Ensure JWT_SECRET is set at startup
-if (!JWT_SECRET) {
-  throw new Error('JWT_SECRET environment variable is required')
+  return jwtSecret
 }
 
 /**
@@ -50,7 +55,7 @@ export const authenticateToken = (req, res, next) => {
   }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET)
+    const decoded = jwt.verify(token, getJwtSecret())
     req.user = decoded
     next()
   } catch (error) {
@@ -86,12 +91,12 @@ export const authenticateToken = (req, res, next) => {
  * res.cookie('token', token, { httpOnly: true, secure: true })
  */
 export const generateToken = (userId) => {
-  return jwt.sign({ userId }, JWT_SECRET, { expiresIn: '7d' })
+  return jwt.sign({ userId }, getJwtSecret(), { expiresIn: '7d' })
 }
 
 /**
  * Generate refresh token
  */
 export const generateRefreshToken = (userId) => {
-  return jwt.sign({ userId }, JWT_SECRET, { expiresIn: '30d' })
+  return jwt.sign({ userId }, getJwtSecret(), { expiresIn: '30d' })
 }

@@ -210,6 +210,7 @@ router.post('/login', authLimiter, asyncHandler(async (req, res) => {
  */
 router.post('/refresh', asyncHandler(async (req, res) => {
   const refreshToken = req.cookies.refreshToken
+  const jwtSecret = process.env.JWT_SECRET
 
   if (!refreshToken) {
     return res.status(401).json({
@@ -220,17 +221,34 @@ router.post('/refresh', asyncHandler(async (req, res) => {
     })
   }
 
+  if (!jwtSecret) {
+    return res.status(500).json({
+      error: {
+        code: 'CONFIGURATION_ERROR',
+        message: 'Server authentication is not configured'
+      }
+    })
+  }
+
   try {
-    const decoded = jwt.verify(refreshToken, process.env.JWT_SECRET || 'your-secret-key-change-in-production')
+    const decoded = jwt.verify(refreshToken, jwtSecret)
     
-    // Generate new access token
+    // Rotate both access and refresh tokens
     const token = generateToken(decoded.userId)
+    const newRefreshToken = generateRefreshToken(decoded.userId)
 
     res.cookie('token', token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'strict',
       maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+    })
+
+    res.cookie('refreshToken', newRefreshToken, {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === 'production',
+      sameSite: 'strict',
+      maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days
     })
 
     res.json({ message: 'Token refreshed successfully' })

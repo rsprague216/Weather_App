@@ -17,6 +17,10 @@ function AILookup() {
   const [result, setResult] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(null)
+  const [disambiguationOptions, setDisambiguationOptions] = useState(null)
+  const [originalQuery, setOriginalQuery] = useState('')
+  const [cachedIntent, setCachedIntent] = useState(null)
+  const [saveStatus, setSaveStatus] = useState(null)
 
   const closeInProgressRef = useRef(false)
 
@@ -71,7 +75,7 @@ function AILookup() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [handleClose])
 
-  const handleSubmit = async (e) => {
+  const handleSubmit = async (e, selectedLocationIndex = undefined) => {
     e?.preventDefault?.()
     
     if (query.trim().length === 0) {
@@ -82,6 +86,7 @@ function AILookup() {
       setLoading(true)
       setError(null)
       setResult(null)
+      setDisambiguationOptions(null)
 
       let currentLocation
       if (mightNeedCurrentLocation(query)) {
@@ -93,13 +98,32 @@ function AILookup() {
         }
       }
 
-      const response = await axios.post('/api/v1/lookup',
-        currentLocation
-          ? { query: query.trim(), units: 'imperial', currentLocation }
-          : { query: query.trim(), units: 'imperial' }
-      )
+      const requestBody = currentLocation
+        ? { query: query.trim(), currentLocation }
+        : { query: query.trim() }
+      
+      // If user selected a specific location from disambiguation, include that
+      if (selectedLocationIndex !== undefined) {
+        requestBody.selectedLocationIndex = selectedLocationIndex
+        requestBody.query = originalQuery || query.trim()
+        if (cachedIntent) {
+          requestBody.intent = cachedIntent
+        }
+      }
+
+      const response = await axios.post('/api/v1/lookup', requestBody)
+
+      // Check if response requires disambiguation
+      if (response.data.requiresDisambiguation) {
+        setDisambiguationOptions(response.data.locations)
+        setOriginalQuery(response.data.originalQuery)
+        setCachedIntent(response.data.intent)
+        setLoading(false)
+        return
+      }
 
       setResult(response.data)
+      setDisambiguationOptions(null)
       setLoading(false)
     } catch (err) {
       setError(err.response?.data?.error?.message || 'Failed to process your query')
@@ -123,12 +147,12 @@ function AILookup() {
       await axios.post('/api/v1/saved-locations', {
         locationId: result.card.location.id
       })
-      alert('Location saved!')
+      setSaveStatus({ type: 'success', message: 'Location saved!' })
     } catch (err) {
       if (err.response?.status === 409) {
-        alert('This location is already saved')
+        setSaveStatus({ type: 'info', message: 'Already saved' })
       } else {
-        alert(err.response?.data?.error?.message || 'Failed to save location')
+        setSaveStatus({ type: 'error', message: err.response?.data?.error?.message || 'Failed to save' })
       }
     }
   }
@@ -137,6 +161,14 @@ function AILookup() {
     setQuery('')
     setResult(null)
     setError(null)
+    setDisambiguationOptions(null)
+    setOriginalQuery('')
+    setCachedIntent(null)
+    setSaveStatus(null)
+  }
+
+  const handleSelectLocation = (locationIndex) => {
+    handleSubmit(null, locationIndex)
   }
 
   return (
@@ -184,8 +216,8 @@ function AILookup() {
             {/* Instructions */}
             <div className="bg-blue-50 text-gray-700 rounded-lg p-3 mb-4">
               <p className="text-sm">
-                Ask a natural language question about the weather anywhere in the world.
-                For example: "What's the weather in Denver tomorrow?" or "Will it rain in Paris this weekend?"
+                Ask a natural language question about the weather for any US location.
+                For example: "What's the weather in Denver tomorrow?" or "Will it rain in Seattle this weekend?"
               </p>
             </div>
 
@@ -228,6 +260,38 @@ function AILookup() {
               </div>
             )}
 
+            {/* Disambiguation Options */}
+            {disambiguationOptions && (
+              <div className="bg-white rounded-lg border border-gray-200 p-4 mb-4">
+                <h2 className="text-lg font-semibold text-gray-800 mb-3">
+                  Multiple locations found for "{originalQuery}"
+                </h2>
+                <p className="text-sm text-gray-600 mb-4">
+                  Please select the location you meant:
+                </p>
+                <div className="space-y-2">
+                  {disambiguationOptions.map((location) => (
+                    <button
+                      key={location.index}
+                      onClick={() => handleSelectLocation(location.index)}
+                      className="w-full text-left p-3 bg-blue-50 hover:bg-blue-100 rounded-lg transition border border-blue-200 hover:border-blue-300"
+                    >
+                      <div className="font-medium text-gray-800">
+                        {location.name}
+                        {location.region && `, ${location.region}`}
+                      </div>
+                      <div className="text-sm text-gray-600 mt-1">
+                        {location.displayName}
+                      </div>
+                      <div className="text-xs text-gray-500 mt-1">
+                        {location.lat.toFixed(4)}°, {location.lon.toFixed(4)}°
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Result */}
             {result && (
               <div className="space-y-3">
@@ -250,17 +314,32 @@ function AILookup() {
                             {result.card.location.region}, {result.card.location.country}
                           </p>
                         )}
+                        {result.card.location?.coordinates && (
+                          <p className="text-xs text-gray-500 mt-0.5">
+                            {result.card.location.coordinates.lat.toFixed(4)}°, {result.card.location.coordinates.lon.toFixed(4)}°
+                          </p>
+                        )}
                         {result.card.timeframe && (
                           <p className="text-sm text-gray-500 mt-1 truncate">{result.card.timeframe}</p>
                         )}
                       </div>
                       {result.card.location?.id && (
-                        <button
-                          onClick={handleSaveLocation}
-                          className="bg-blue-100 text-blue-700 px-3 py-1.5 rounded-lg hover:bg-blue-200 transition text-sm font-medium shrink-0"
-                        >
-                          Save Location
-                        </button>
+                        saveStatus ? (
+                          <span className={`px-3 py-1.5 rounded-lg text-sm font-medium shrink-0 ${
+                            saveStatus.type === 'success' ? 'bg-green-100 text-green-700' :
+                            saveStatus.type === 'error' ? 'bg-red-100 text-red-700' :
+                            'bg-blue-100 text-blue-700'
+                          }`}>
+                            {saveStatus.message}
+                          </span>
+                        ) : (
+                          <button
+                            onClick={handleSaveLocation}
+                            className="bg-blue-100 text-blue-700 px-3 py-1.5 rounded-lg hover:bg-blue-200 transition text-sm font-medium shrink-0"
+                          >
+                            Save Location
+                          </button>
+                        )
                       )}
                     </div>
 

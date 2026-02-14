@@ -100,12 +100,24 @@ export const weatherQuerySchema = z.object({
  * Validates user's plain text query and optional unit preference.
  */
 export const lookupSchema = z.object({
-  query: z.string().min(1, 'Query is required'),
-  units: z.enum(['imperial', 'metric']).optional().default('imperial'),
+  query: z.string().min(1, 'Query is required').max(500, 'Query is too long'),
   currentLocation: z
     .object({
       lat: z.coerce.number(),
       lon: z.coerce.number()
+    })
+    .optional(),
+  selectedLocationIndex: z.number().int().min(0).optional(),
+  intent: z
+    .object({
+      intentType: z.enum(['CURRENT', 'DAY', 'HOURLY_WINDOW', 'DATE_RANGE']),
+      locationProvided: z.boolean(),
+      location: z.string().optional(),
+      date: z.string().optional(),
+      startDate: z.string().optional(),
+      endDate: z.string().optional(),
+      startHour: z.number().optional(),
+      endHour: z.number().optional()
     })
     .optional()
 })

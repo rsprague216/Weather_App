@@ -25,6 +25,8 @@ import OpenAI from 'openai'
 import { asyncHandler } from '../middleware/errorHandler.js'
 import { authenticateToken } from '../middleware/auth.js'
 import { lookupSchema } from '../validators/schemas.js'
+import { fetchWeatherData } from '../utils/weatherService.js'
+import { isStateLevelQuery } from '../utils/lookupDisambiguation.js'
 import pool from '../utils/db.js'
 
 const router = express.Router()
@@ -55,6 +57,7 @@ async function storeOrGetLocation(locationData) {
   const country = address?.country || 'USA'
   const externalId = locationData.place_id?.toString() || `${lat},${lon}`
 
+  // Check if location already exists
   const existingLocation = await pool.query(
     'SELECT id FROM locations WHERE external_id = $1',
     [externalId]
@@ -69,20 +72,45 @@ async function storeOrGetLocation(locationData) {
     }
   }
 
-  let timezone = 'America/New_York'
+  // Estimate timezone from longitude as a fallback (US only)
+  function estimateTimezone(longitude) {
+    const lng = parseFloat(longitude)
+    if (lng > -82) return 'America/New_York'
+    if (lng > -90) return 'America/Chicago'
+    if (lng > -105) return 'America/Denver'
+    return 'America/Los_Angeles'
+  }
+
+  let timezone = estimateTimezone(lon)
   try {
     const nwsResponse = await axiosInstance.get(`${NWS_API_BASE_URL}/points/${lat},${lon}`)
     timezone = nwsResponse.data.properties.timeZone
   } catch (error) {
-    console.warn('Could not fetch timezone from NWS (lookup):', error.message)
+    console.warn(`Could not fetch timezone from NWS (lookup), using estimate (${timezone}):`, error.message)
   }
 
+  // Upsert to handle concurrent inserts for the same external_id
   const result = await pool.query(
     `INSERT INTO locations (external_id, name, region, country, latitude, longitude, timezone)
      VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (external_id) DO NOTHING
      RETURNING id`,
     [externalId, name, region, country, parseFloat(lat), parseFloat(lon), timezone]
   )
+
+  // If DO NOTHING fired, the RETURNING clause returns no rows — fetch the existing id
+  if (result.rows.length === 0) {
+    const existing = await pool.query(
+      'SELECT id FROM locations WHERE external_id = $1',
+      [externalId]
+    )
+    return {
+      id: existing.rows[0].id,
+      name,
+      region,
+      country
+    }
+  }
 
   return {
     id: result.rows[0].id,
@@ -151,18 +179,6 @@ const weatherIntentTool = {
   }
 }
 
-async function reverseGeocodeLocationName(lat, lon) {
-  try {
-    const response = await axiosInstance.get(`${NOMINATIM_BASE_URL}/reverse`, {
-      params: { lat, lon, format: 'json' }
-    })
-    const address = response.data?.address
-    return address?.city || address?.town || address?.village || address?.county || 'Current Location'
-  } catch (error) {
-    console.warn('Reverse geocoding failed (lookup):', error.message)
-    return 'Current Location'
-  }
-}
 
 /**
  * Generates a natural language summary of weather data based on intent type.
@@ -189,7 +205,7 @@ function generateSummaryText(intent, weatherData) {
   switch (intentType) {
     case 'CURRENT':
       return `${location.name} is currently ${current.condition} with a temperature of ${Math.round(current.tempF)}°F.`
-    
+
     case 'DAY':
       if (forecast && forecast.length > 0) {
         const day = forecast[0].day
@@ -199,10 +215,17 @@ function generateSummaryText(intent, weatherData) {
     
     case 'HOURLY_WINDOW':
       if (forecast && forecast.length > 0 && forecast[0].hourly) {
-        const hours = forecast[0].hourly
-        const temps = hours.map(h => h.tempF)
-        const avgTemp = Math.round(temps.reduce((a, b) => a + b, 0) / temps.length)
-        return `${location.name} will average ${avgTemp}°F during the requested hours.`
+        const startH = intent.startHour ?? 0
+        const endH = intent.endHour ?? 23
+        const hours = forecast[0].hourly.filter(h => {
+          const hour = new Date(h.time).getHours()
+          return hour >= startH && hour <= endH
+        })
+        if (hours.length > 0) {
+          const temps = hours.map(h => h.tempF)
+          const avgTemp = Math.round(temps.reduce((a, b) => a + b, 0) / temps.length)
+          return `${location.name} will average ${avgTemp}°F from ${startH}:00 to ${endH}:00.`
+        }
       }
       break
     
@@ -274,7 +297,12 @@ function generateCard(intent, weatherData) {
     case 'HOURLY_WINDOW':
       if (forecast && forecast.length > 0 && forecast[0].hourly) {
         const allHourly = forecast[0].hourly
-        const hours = allHourly.slice(intent.startHour || 0, (intent.endHour || 23) + 1)
+        const startH = intent.startHour ?? 0
+        const endH = intent.endHour ?? 23
+        const hours = allHourly.filter(h => {
+          const hour = new Date(h.time).getHours()
+          return hour >= startH && hour <= endH
+        })
         return {
           type: 'HOURLY_WINDOW',
           title: `${location.name} • ${intent.startHour || 0}:00-${intent.endHour || 23}:00`,
@@ -307,123 +335,6 @@ function generateCard(intent, weatherData) {
   return null
 }
 
-/**
- * Fetches weather data from NWS API (internal implementation for lookup endpoint).
- * 
- * Similar to weatherService.js but duplicated here for lookup-specific needs.
- * Makes calls to NWS API to retrieve forecast and hourly data.
- * 
- * @param {number} lat - Latitude
- * @param {number} lon - Longitude
- * @param {string} locationName - Location name for response
- * @returns {Promise<Object>} Weather data object with location, current, and forecast
- * 
- * @throws {Error} If NWS API request fails
- * @private
- */
-async function fetchNWSWeather(lat, lon, locationName) {
-  try {
-    // Get gridpoint data
-    const pointsResponse = await axiosInstance.get(`${NWS_API_BASE_URL}/points/${lat},${lon}`, {
-      headers: { 'User-Agent': 'WeatherApp/1.0' }
-    })
-    
-    const properties = pointsResponse.data.properties
-    const forecastUrl = properties.forecast
-    const forecastHourlyUrl = properties.forecastHourly
-    const timezone = properties.timeZone
-    
-    // Get forecast data
-    const [forecastResponse, hourlyResponse] = await Promise.all([
-      axiosInstance.get(forecastUrl, { headers: { 'User-Agent': 'WeatherApp/1.0' } }),
-      axiosInstance.get(forecastHourlyUrl, { headers: { 'User-Agent': 'WeatherApp/1.0' } })
-    ])
-    
-    const periods = forecastResponse.data.properties.periods
-    const hourlyPeriods = hourlyResponse.data.properties.periods
-    
-    // Current conditions (first hourly period)
-    const currentHourly = hourlyPeriods[0]
-    const current = {
-      tempF: currentHourly.temperature,
-      tempC: (currentHourly.temperature - 32) * 5/9,
-      condition: currentHourly.shortForecast,
-      windMph: parseInt(currentHourly.windSpeed) || 0,
-      windDir: currentHourly.windDirection,
-      humidity: currentHourly.relativeHumidity?.value || 0,
-      feelsLikeF: currentHourly.temperature,
-      feelsLikeC: (currentHourly.temperature - 32) * 5/9,
-      precipChance: currentHourly.probabilityOfPrecipitation?.value || 0
-    }
-    
-    // Group forecast periods by day
-    const forecastByDay = {}
-    periods.forEach(period => {
-      const date = period.startTime.split('T')[0]
-      if (!forecastByDay[date]) {
-        forecastByDay[date] = { day: null, night: null }
-      }
-      if (period.isDaytime) {
-        forecastByDay[date].day = period
-      } else {
-        forecastByDay[date].night = period
-      }
-    })
-    
-    // Group hourly by day
-    const hourlyByDay = {}
-    hourlyPeriods.forEach(period => {
-      const date = period.startTime.split('T')[0]
-      if (!hourlyByDay[date]) {
-        hourlyByDay[date] = []
-      }
-      hourlyByDay[date].push(period)
-    })
-    
-    // Build daily forecast
-    const forecast = Object.keys(forecastByDay).slice(0, 7).map(date => {
-      const dayData = forecastByDay[date]
-      const hourlyData = hourlyByDay[date] || []
-      
-      const dayPeriod = dayData.day || dayData.night
-      const nightPeriod = dayData.night || dayData.day
-      
-      return {
-        date,
-        day: {
-          maxTempF: dayPeriod?.temperature || 0,
-          minTempF: nightPeriod?.temperature || 0,
-          condition: dayPeriod?.shortForecast || 'Unknown',
-          detailedForecast: dayPeriod?.detailedForecast || '',
-          dailyChanceOfRain: Math.max(
-            dayPeriod?.probabilityOfPrecipitation?.value || 0,
-            nightPeriod?.probabilityOfPrecipitation?.value || 0
-          )
-        },
-        hourly: hourlyData.map(hour => ({
-          time: hour.startTime,
-          tempF: hour.temperature,
-          condition: hour.shortForecast,
-          chanceOfRain: hour.probabilityOfPrecipitation?.value || 0
-        }))
-      }
-    })
-    
-    return {
-      location: {
-        name: locationName,
-        latitude: lat,
-        longitude: lon,
-        timezone
-      },
-      current,
-      forecast
-    }
-  } catch (error) {
-    console.error('NWS API Error:', error.response?.data || error.message)
-    throw error
-  }
-}
 
 /**
  * POST /api/v1/lookup
@@ -463,9 +374,9 @@ async function fetchNWSWeather(lat, lon, locationName) {
  * Response 400: Invalid query format
  */
 router.post('/', asyncHandler(async (req, res) => {
-  const { query, units, currentLocation } = lookupSchema.parse(req.body)
+  const { query, currentLocation, selectedLocationIndex, intent: cachedIntent } = lookupSchema.parse(req.body)
 
-  if (!process.env.OPENAI_API_KEY) {
+  if (!process.env.OPENAI_API_KEY && !cachedIntent) {
     return res.status(500).json({
       error: {
         code: 'CONFIGURATION_ERROR',
@@ -475,34 +386,39 @@ router.post('/', asyncHandler(async (req, res) => {
   }
 
   try {
-    // Step 1: Extract intent using OpenAI
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4-turbo-preview',
-      messages: [
-        {
-          role: 'system',
-          content: 'You are a weather query intent extraction assistant. Extract structured intent from natural language weather queries. IMPORTANT: If the user does not explicitly specify a location, set locationProvided=false and omit location (or set it to an empty string).'
-        },
-        {
-          role: 'user',
-          content: query
-        }
-      ],
-      tools: [weatherIntentTool],
-      tool_choice: { type: 'function', function: { name: 'extract_weather_intent' } }
-    })
-
-    const toolCall = completion.choices[0].message.tool_calls?.[0]
-    if (!toolCall) {
-      return res.status(400).json({
-        error: {
-          code: 'INTENT_EXTRACTION_FAILED',
-          message: 'Could not understand the weather query'
-        }
+    // Step 1: Extract intent using OpenAI (skip if already extracted during disambiguation)
+    let intent
+    if (cachedIntent) {
+      intent = cachedIntent
+    } else {
+      const completion = await openai.chat.completions.create({
+        model: 'gpt-4o',
+        messages: [
+          {
+            role: 'system',
+            content: `You are a weather query intent extraction assistant. Today is ${new Date().toISOString().split('T')[0]}. Extract structured intent from natural language weather queries. Use today's date to resolve relative references like "tomorrow", "this weekend", "next week", etc. IMPORTANT: If the user does not explicitly specify a location, set locationProvided=false and omit location (or set it to an empty string).`
+          },
+          {
+            role: 'user',
+            content: query
+          }
+        ],
+        tools: [weatherIntentTool],
+        tool_choice: { type: 'function', function: { name: 'extract_weather_intent' } }
       })
-    }
 
-    const intent = JSON.parse(toolCall.function.arguments)
+      const toolCall = completion.choices[0].message.tool_calls?.[0]
+      if (!toolCall) {
+        return res.status(400).json({
+          error: {
+            code: 'INTENT_EXTRACTION_FAILED',
+            message: 'Could not understand the weather query'
+          }
+        })
+      }
+
+      intent = JSON.parse(toolCall.function.arguments)
+    }
 
     let weatherData
     let resolvedLocation = null
@@ -522,8 +438,30 @@ router.post('/', asyncHandler(async (req, res) => {
         })
       }
 
-      const locationName = await reverseGeocodeLocationName(currentLocation.lat, currentLocation.lon)
-      weatherData = await fetchNWSWeather(currentLocation.lat, currentLocation.lon, locationName)
+      // Reverse geocode to get location details for display and storage
+      let locationName = 'Current Location'
+      try {
+        const reverseResponse = await axiosInstance.get(`${NOMINATIM_BASE_URL}/reverse`, {
+          params: { lat: currentLocation.lat, lon: currentLocation.lon, format: 'json', addressdetails: 1 }
+        })
+        const reverseData = reverseResponse.data
+        const address = reverseData?.address
+        locationName = address?.city || address?.town || address?.village || address?.county || 'Current Location'
+        resolvedLocation = await storeOrGetLocation({
+          address,
+          lat: currentLocation.lat,
+          lon: currentLocation.lon,
+          place_id: reverseData?.place_id
+        })
+      } catch (error) {
+        console.warn('Reverse geocoding failed (lookup):', error.message)
+      }
+
+      weatherData = await fetchWeatherData(currentLocation.lat, currentLocation.lon, locationName)
+      weatherData.coordinates = {
+        lat: parseFloat(currentLocation.lat),
+        lon: parseFloat(currentLocation.lon)
+      }
     } else {
       const locationQuery = locationToken
       if (!locationQuery) {
@@ -541,7 +479,7 @@ router.post('/', asyncHandler(async (req, res) => {
           q: locationQuery,
           format: 'json',
           addressdetails: 1,
-          limit: 1,
+          limit: 5, // Get multiple results for disambiguation
           countrycodes: 'us' // NWS only covers US
         }
       })
@@ -555,13 +493,147 @@ router.post('/', asyncHandler(async (req, res) => {
         })
       }
 
-      const location = searchResponse.data[0]
-      const address = location.address
-      const locationName = address.city || address.town || address.village || address.county || locationQuery
-      resolvedLocation = await storeOrGetLocation(location)
+      const results = searchResponse.data
 
-      // Fetch weather data from NWS
-      weatherData = await fetchNWSWeather(location.lat, location.lon, locationName)
+      // Log results for debugging
+      console.log(`Geocoding results for "${locationQuery}":`, results.map(r => ({
+        display_name: r.display_name,
+        type: r.type,
+        class: r.class,
+        osm_type: r.osm_type,
+        importance: r.importance
+      })))
+
+      const firstResult = results[0]
+      const isStateLevel = isStateLevelQuery(locationQuery, firstResult)
+
+      // If state-level and no selection made, show major cities for disambiguation.
+      if (isStateLevel && selectedLocationIndex === undefined) {
+        const stateName = firstResult.address?.state || locationQuery
+
+        console.log(`Broad location detected. Fetching cities in: ${stateName}`)
+
+        const citySearchResponse = await axiosInstance.get(`${NOMINATIM_BASE_URL}/search`, {
+          params: {
+            q: `city in ${stateName}`,
+            format: 'json',
+            addressdetails: 1,
+            limit: 10,
+            countrycodes: 'us'
+          }
+        })
+
+        // Filter to actual cities/towns within the correct state and deduplicate by name
+        const seen = new Set()
+        const cities = citySearchResponse.data
+          .filter(r => {
+            const addr = r.address
+            const city = addr.city || addr.town || addr.village
+            if (!city) return false
+            if (addr.state !== stateName) return false
+            if (seen.has(city)) return false
+            seen.add(city)
+            return true
+          })
+          .slice(0, 5)
+
+        if (cities.length > 0) {
+          const disambiguationOptions = cities.map((result, index) => {
+            const addr = result.address
+            const name = addr.city || addr.town || addr.village || addr.county || 'Unknown'
+            return {
+              index,
+              name,
+              region: addr.state || '',
+              country: addr.country || 'USA',
+              displayName: result.display_name,
+              lat: parseFloat(result.lat),
+              lon: parseFloat(result.lon)
+            }
+          })
+
+          return res.json({
+            requiresDisambiguation: true,
+            originalQuery: locationQuery,
+            locations: disambiguationOptions,
+            intent,
+            stateName
+          })
+        } else {
+          return res.status(400).json({
+            error: {
+              code: 'LOCATION_TOO_BROAD',
+              message: `Could not find cities in "${locationQuery}". Please specify a city or town.`
+            }
+          })
+        }
+      }
+
+      // Detect ambiguity: multiple distinct locations (non-state level).
+      const isAmbiguous = selectedLocationIndex === undefined
+        && !isStateLevel
+        && results.length > 1
+        && (() => {
+          const locationNames = results.map(r => {
+            const addr = r.address
+            return addr.city || addr.town || addr.village || addr.county || 'Unknown'
+          })
+          const uniqueNames = new Set(locationNames)
+          return uniqueNames.size > 1
+        })()
+
+      if (isAmbiguous) {
+        const disambiguationOptions = results.slice(0, 5).map((result, index) => {
+          const addr = result.address
+          const name = addr.city || addr.town || addr.village || addr.county || 'Unknown'
+          const region = addr.state || ''
+          const country = addr.country || 'USA'
+          
+          return {
+            index,
+            name,
+            region,
+            country,
+            displayName: result.display_name,
+            lat: parseFloat(result.lat),
+            lon: parseFloat(result.lon)
+          }
+        })
+
+        return res.json({
+          requiresDisambiguation: true,
+          originalQuery: locationQuery,
+          locations: disambiguationOptions,
+          intent
+        })
+      }
+
+      // Select the appropriate location (only if we haven't already fetched weather for a capital)
+      if (!weatherData) {
+        const locationIndex = selectedLocationIndex !== undefined ? selectedLocationIndex : 0
+        if (locationIndex >= results.length) {
+          return res.status(400).json({
+            error: {
+              code: 'INVALID_SELECTION',
+              message: 'Selected location index is out of range'
+            }
+          })
+        }
+
+        const location = results[locationIndex]
+        const address = location.address
+        const locationName = address.city || address.town || address.village || address.county || locationQuery
+        resolvedLocation = await storeOrGetLocation(location)
+
+        // Fetch weather data from NWS
+        weatherData = await fetchWeatherData(location.lat, location.lon, locationName)
+        
+        // Add coordinates to weather data for transparency
+        weatherData.coordinates = {
+          lat: parseFloat(location.lat),
+          lon: parseFloat(location.lon)
+        }
+      }
     }
 
     // Step 4: Generate summary and card
@@ -575,7 +647,8 @@ router.post('/', asyncHandler(async (req, res) => {
           name: weatherData.location.name,
           id: resolvedLocation?.id || null,
           region: resolvedLocation?.region,
-          country: resolvedLocation?.country
+          country: resolvedLocation?.country,
+          coordinates: weatherData.coordinates
         },
         current: {
           temp: weatherData.current.tempF,
@@ -596,7 +669,8 @@ router.post('/', asyncHandler(async (req, res) => {
     })
   } catch (error) {
     console.error('Lookup Error:', error.response?.data || error.message)
-    
+
+    // NWS 404 — coordinates outside US coverage
     if (error.response?.status === 404) {
       return res.status(404).json({
         error: {
@@ -605,11 +679,38 @@ router.post('/', asyncHandler(async (req, res) => {
         }
       })
     }
-    
+
+    // OpenAI errors
+    if (error?.constructor?.name === 'APIError' || error?.type === 'invalid_request_error') {
+      const status = error.status || 500
+      if (status === 429) {
+        return res.status(429).json({
+          error: {
+            code: 'AI_RATE_LIMITED',
+            message: 'AI service is temporarily busy. Please try again in a moment.'
+          }
+        })
+      }
+      if (status === 401 || status === 403) {
+        return res.status(500).json({
+          error: {
+            code: 'AI_AUTH_ERROR',
+            message: 'AI service authentication failed. Please contact support.'
+          }
+        })
+      }
+      return res.status(502).json({
+        error: {
+          code: 'AI_SERVICE_ERROR',
+          message: 'AI service encountered an error. Please try again.'
+        }
+      })
+    }
+
     return res.status(500).json({
       error: {
         code: 'LOOKUP_ERROR',
-        message: 'Failed to process weather lookup'
+        message: 'Failed to process weather lookup. Please try again.'
       }
     })
   }

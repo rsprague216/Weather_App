@@ -14,5 +14,6 @@ CREATE INDEX IF NOT EXISTS idx_saved_locations_user_id ON saved_locations(user_i
 CREATE INDEX IF NOT EXISTS idx_saved_locations_user_sort ON saved_locations(user_id, sort_key);
 
 -- Create trigger to automatically update updated_at timestamp
+DROP TRIGGER IF EXISTS update_saved_locations_updated_at ON saved_locations;
 CREATE TRIGGER update_saved_locations_updated_at BEFORE UPDATE ON saved_locations
   FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
